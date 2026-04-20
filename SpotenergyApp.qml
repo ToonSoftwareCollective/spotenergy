@@ -180,6 +180,10 @@ App {
 						var quoteTime = Date.parse(start) - timeStep
 						i = period.indexOf("<price.amount>")
 						while ( i > 0 ) {
+							var p1 = period.indexOf("<position>")
+							var positionString = period.slice(p1+10)
+							var p2 = positionString.indexOf("</position>")
+							var position = positionString.slice(0,p2) / 1
 							period = period.slice(i+14)
 							j = period.indexOf("</price.amount>")
 							var quotePrice = period.slice(0,j) / 1000
@@ -187,6 +191,37 @@ App {
 							var quoteTarrif = {timestamp: quoteTime, tariff: quotePrice}
 							if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime() ) {
 								tariffsTemp.push(quoteTarrif)
+							}
+							// check if next position skips — fill gap with current price
+							var nextp1 = period.indexOf("<position>")
+							if (nextp1 > 0) {
+								var nextpositionString = period.slice(nextp1+10)
+								var nextp2 = nextpositionString.indexOf("</position>")
+								var nextposition = nextpositionString.slice(0,nextp2) / 1
+								if (nextposition > (position + 1)) {
+									console.log("SpotEnergy: gap detected, filling " + (nextposition - position - 1) + " slot(s) at position " + position)
+									while (nextposition > (position + 1)) {
+										position = position + 1
+										quoteTime = quoteTime + timeStep
+										quoteTarrif = {timestamp: quoteTime, tariff: quotePrice}
+										if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime() ) {
+											tariffsTemp.push(quoteTarrif)
+										}
+									}
+								}
+							} else if (timeStep === 900000) {
+								// last point in a 15-min period — fill trailing slots to complete the hour
+								if (position % 4 !== 0) {
+									var gaps = 4 - (position % 4)
+									console.log("SpotEnergy: trailing gap in 15-min period, filling " + gaps + " slot(s)")
+									for (var g = 0; g < gaps; g++) {
+										quoteTime = quoteTime + timeStep
+										quoteTarrif = {timestamp: quoteTime, tariff: quotePrice}
+										if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime() ) {
+											tariffsTemp.push(quoteTarrif)
+										}
+									}
+								}
 							}
 							i = period.indexOf("<price.amount>")
 						}
