@@ -1,3 +1,8 @@
+2.2.0
+- support ENTSOE 15-minute resolution data
+- add setting to toggle between 15-min bars and hourly averaged bars
+- remove easyenergy fallback (API no longer works)
+
 2.1.6
 - change entsoe api url
 
