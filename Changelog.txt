@@ -1,3 +1,6 @@
+2.2.1
+- in quarter mode price was still the hour average price, fixed
+
 2.2.0
 - support ENTSOE 15-minute resolution data
 - add setting to toggle between 15-min bars and hourly averaged bars
