@@ -291,6 +291,7 @@ App {
 						tariffValuesQuarter = quarterTariffs.slice();
 						datapointsQuarter = tariffsTemp.length;
 						currentBarIndexQuarter = settings.lookbackHours * 4 + Math.floor(currentMinutes / 15);
+						currentTariffUsage = quarterTariffs[currentBarIndexQuarter];
 					}
 				}
 				else {
