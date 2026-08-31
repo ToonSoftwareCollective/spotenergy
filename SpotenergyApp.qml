@@ -176,8 +176,7 @@ App {
 			}
 		}
 
-		datapoints = hourlyTemp.length;
-		if (datapoints < 2) {
+		if (hourlyTemp.length < 2) {
 			console.log("SpotEnergy: " + sourceLabel + " returned not enough datapoints!");
 			return false;
 		}
@@ -191,7 +190,10 @@ App {
 			if (minTariffValue > tariffs[i]) { minTariffValue = tariffs[i]; }
 			if (maxTariffValue < tariffs[i]) { maxTariffValue = tariffs[i]; }
 		}
+		// update the array before datapoints (bound to the Repeater's model) so the
+		// Repeater never sees a model count larger than the array backing it
 		tariffValues = tariffs.slice();
+		datapoints = hourlyTemp.length;
 
 		// calculate quartiles from hourly data
 		var quartiles;
