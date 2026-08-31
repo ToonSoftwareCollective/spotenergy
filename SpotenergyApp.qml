@@ -145,6 +145,127 @@ App {
 		getCurrentTariffsEntsoe()
 	}
 
+	function formatDateISO(date) {
+		var y = date.getFullYear();
+		var mo = ("0" + (date.getMonth() + 1)).slice(-2);
+		var d = ("0" + date.getDate()).slice(-2);
+		return y + "-" + mo + "-" + d;
+	}
+
+	// shared by both entsoe and easyenergy: aggregates raw tariffsTemp (timestamp/tariff pairs)
+	// into hourly averages, computes quartiles/min/max/current tariff, and (if enabled) stores
+	// the raw 15-min data too. Returns false if there weren't enough datapoints to use.
+	function processTariffs(tariffsTemp, now, currentMinutes, sourceLabel) {
+		tariffsTemp.sort(function(a, b){return a.timestamp - b.timestamp});
+
+		// always aggregate to hourly averages (used by tile, quartiles, current tariff)
+		var hourlyTemp = []
+		var idx = 0
+		while (idx < tariffsTemp.length) {
+			var hourStart = new Date(tariffsTemp[idx].timestamp)
+			hourStart.setMinutes(0, 0, 0)
+			var sum = 0
+			var count = 0
+			while (idx < tariffsTemp.length && tariffsTemp[idx].timestamp < hourStart.getTime() + 3600000) {
+				sum += tariffsTemp[idx].tariff
+				count++
+				idx++
+			}
+			if (count > 0) {
+				hourlyTemp.push({timestamp: hourStart.getTime(), tariff: sum / count})
+			}
+		}
+
+		datapoints = hourlyTemp.length;
+		if (datapoints < 2) {
+			console.log("SpotEnergy: " + sourceLabel + " returned not enough datapoints!");
+			return false;
+		}
+
+		minTariffValue = 1000;
+		maxTariffValue = -1000;
+
+		var tariffs = [];
+		for (var i = 0; i < hourlyTemp.length; i++) {
+			tariffs[i] = hourlyTemp[i].tariff;
+			if (minTariffValue > tariffs[i]) { minTariffValue = tariffs[i]; }
+			if (maxTariffValue < tariffs[i]) { maxTariffValue = tariffs[i]; }
+		}
+		tariffValues = tariffs.slice();
+
+		// calculate quartiles from hourly data
+		var quartiles;
+		if (settings.algoMedian) {
+			quartiles = SpotenergyJS.getQuartilesMedian(tariffs);
+		} else {
+			quartiles = SpotenergyJS.getQuartilesAverage(tariffs);
+		}
+		tariffQ1 = quartiles[0];
+		tariffMedian = quartiles[1];
+		tariffQ3 = quartiles[2];
+
+		// hourly current bar index and tariff
+		currentBarIndex = settings.lookbackHours;
+		currentTariffUsage = tariffs[currentBarIndex];
+		if (settings.domoticzEnable) { updateDomoticz(); }
+
+		// additionally store 15-min data for the large screen when showQuarterHour is on
+		if (settings.showQuarterHour) {
+			var quarterTariffs = [];
+			for (var i = 0; i < tariffsTemp.length; i++) {
+				quarterTariffs[i] = tariffsTemp[i].tariff;
+			}
+			tariffValuesQuarter = quarterTariffs.slice();
+			datapointsQuarter = tariffsTemp.length;
+			currentBarIndexQuarter = settings.lookbackHours * 4 + Math.floor(currentMinutes / 15);
+			currentTariffUsage = quarterTariffs[currentBarIndexQuarter];
+		}
+
+		return true;
+	}
+
+	function getCurrentTariffsEasyenergy() {
+		var now = new Date();
+		currentHour = now.getHours();
+		var currentMinutes = now.getMinutes();
+		startHour = currentHour - settings.lookbackHours;
+		now.setHours(startHour,0,0,0);
+		var endDate = new Date(now.getTime() + ((settings.lookforwardHours + settings.lookbackHours) * 3600 * 1000));
+
+		// easyenergy takes whole-day ranges [start, end) in local dates, so pad a day on each side
+		var startDateStr = formatDateISO(now);
+		var endDateStr = formatDateISO(new Date(endDate.getTime() + 24 * 3600 * 1000));
+
+		var xmlhttp = new XMLHttpRequest();
+		xmlhttp.onreadystatechange = function() {
+			if (xmlhttp.readyState == 4) {
+				if (xmlhttp.status == 200) {
+					try {
+						var data = JSON.parse(xmlhttp.responseText);
+						var tariffsTemp = []
+						for (var i = 0; i < data.prices.length; i++) {
+							var item = data.prices[i];
+							var quoteTime = Date.parse(item.from);
+							if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime()) {
+								tariffsTemp.push({timestamp: quoteTime, tariff: item.price});
+							}
+						}
+						processTariffs(tariffsTemp, now, currentMinutes, "easyenergy backup");
+					} catch (e) {
+						console.log("SpotEnergy: easyenergy backup parse error: " + e);
+					}
+				}
+				else {
+					console.log("SpotEnergy: easyenergy backup URL fetch failed!");
+				}
+			}
+		}
+		var urlEasyenergy = "https://price-graph.mijn.easyenergy.com/api/prices?start=" + startDateStr + "&end=" + endDateStr + "&type=electricity&granularity=quarter";
+		console.log("SpotEnergy easyenergy backup url: " + urlEasyenergy);
+		xmlhttp.open("GET", urlEasyenergy, true);
+		xmlhttp.send();
+	}
+
 	function getCurrentTariffsEntsoe() {
 		var now = new Date();
 		currentHour = now.getHours();
@@ -178,6 +299,13 @@ App {
 						j = period.indexOf("</start>")
 						var start = period.slice(i+7,j)
 						var quoteTime = Date.parse(start) - timeStep
+
+						// the period's declared end — used to fill trailing points ENTSOE
+						// omits when the price doesn't change through the rest of the period
+						var endI = period.indexOf("<end>")
+						var endJ = period.indexOf("</end>")
+						var periodEnd = (endI >= 0 && endJ >= 0) ? Date.parse(period.slice(endI+5, endJ)) : null
+
 						i = period.indexOf("<price.amount>")
 						while ( i > 0 ) {
 							var p1 = period.indexOf("<position>")
@@ -209,17 +337,17 @@ App {
 										}
 									}
 								}
-							} else if (timeStep === 900000) {
-								// last point in a 15-min period — fill trailing slots to complete the hour
-								if (position % 4 !== 0) {
-									var gaps = 4 - (position % 4)
-									console.log("SpotEnergy: trailing gap in 15-min period, filling " + gaps + " slot(s)")
-									for (var g = 0; g < gaps; g++) {
-										quoteTime = quoteTime + timeStep
-										quoteTarrif = {timestamp: quoteTime, tariff: quotePrice}
-										if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime() ) {
-											tariffsTemp.push(quoteTarrif)
-										}
+							} else if (periodEnd !== null && quoteTime + timeStep <= periodEnd) {
+								// last point sent in this period, but the period itself continues —
+								// ENTSOE omits trailing points when the price doesn't change, so
+								// fill forward with the last known price to the period's real end
+								var trailingGaps = Math.round((periodEnd - quoteTime) / timeStep)
+								console.log("SpotEnergy: trailing gap at end of period, filling " + trailingGaps + " slot(s)")
+								while (quoteTime + timeStep <= periodEnd) {
+									quoteTime = quoteTime + timeStep
+									quoteTarrif = {timestamp: quoteTime, tariff: quotePrice}
+									if (quoteTime >= now.getTime() && quoteTime <= endDate.getTime() ) {
+										tariffsTemp.push(quoteTarrif)
 									}
 								}
 							}
@@ -229,73 +357,13 @@ App {
 						i = res.indexOf("<Period>")
 						j = res.indexOf("</Period>")
 					}
-					tariffsTemp.sort(function(a, b){return a.timestamp - b.timestamp});
-
-					// always aggregate to hourly averages (used by tile, quartiles, current tariff)
-					var hourlyTemp = []
-					var idx = 0
-					while (idx < tariffsTemp.length) {
-						var hourStart = new Date(tariffsTemp[idx].timestamp)
-						hourStart.setMinutes(0, 0, 0)
-						var sum = 0
-						var count = 0
-						while (idx < tariffsTemp.length && tariffsTemp[idx].timestamp < hourStart.getTime() + 3600000) {
-							sum += tariffsTemp[idx].tariff
-							count++
-							idx++
-						}
-						if (count > 0) {
-							hourlyTemp.push({timestamp: hourStart.getTime(), tariff: sum / count})
-						}
-					}
-
-					datapoints = hourlyTemp.length;
-					if (datapoints < 2) {
-						console.log("SpotEnergy: ENTSOE URL fetch returned not enough datapoints!");
-						return;
-					}
-
-					minTariffValue = 1000;
-					maxTariffValue = -1000;
-
-					var tariffs = [];
-					for (var i = 0; i < hourlyTemp.length; i++) {
-						tariffs[i] = hourlyTemp[i].tariff;
-						if (minTariffValue > tariffs[i]) { minTariffValue = tariffs[i]; }
-						if (maxTariffValue < tariffs[i]) { maxTariffValue = tariffs[i]; }
-					}
-					tariffValues = tariffs.slice();
-
-					// calculate quartiles from hourly data
-					var quartiles;
-					if (settings.algoMedian) {
-						quartiles = SpotenergyJS.getQuartilesMedian(tariffs);
-					} else {
-						quartiles = SpotenergyJS.getQuartilesAverage(tariffs);
-					}
-					tariffQ1 = quartiles[0];
-					tariffMedian = quartiles[1];
-					tariffQ3 = quartiles[2];
-
-					// hourly current bar index and tariff
-					currentBarIndex = settings.lookbackHours;
-					currentTariffUsage = tariffs[currentBarIndex];
-					if (settings.domoticzEnable) { updateDomoticz(); }
-
-					// additionally store 15-min data for the large screen when showQuarterHour is on
-					if (settings.showQuarterHour) {
-						var quarterTariffs = [];
-						for (var i = 0; i < tariffsTemp.length; i++) {
-							quarterTariffs[i] = tariffsTemp[i].tariff;
-						}
-						tariffValuesQuarter = quarterTariffs.slice();
-						datapointsQuarter = tariffsTemp.length;
-						currentBarIndexQuarter = settings.lookbackHours * 4 + Math.floor(currentMinutes / 15);
-						currentTariffUsage = quarterTariffs[currentBarIndexQuarter];
+					if (!processTariffs(tariffsTemp, now, currentMinutes, "ENTSOE")) {
+						getCurrentTariffsEasyenergy();
 					}
 				}
 				else {
 					console.log("SpotEnergy: ENTSOE URL fetch failed!");
+					getCurrentTariffsEasyenergy();
 				}
 			}
 		}
