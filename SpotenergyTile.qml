@@ -86,9 +86,9 @@ Tile {
 					anchors.bottom: parent.bottom
 					anchors.horizontalCenter: parent.horizontalCenter
 					text: (index + app.startHour) % 24
-					font.pointSize: 4
-					color: (typeof dimmableColors !== 'undefined') ? dimmableColors.tileTextColor : colors.tileTextColor
-					visible: !((index + app.startHour) % 3)
+					font.pointSize: 8
+					color: (typeof dimmableColors !== 'undefined') ? dimmableColors.tileTextColor : colors.tileTextColor 
+					visible: !((index + app.startHour) % 3) //show each 3 hours an x-index
 				}
 			}
 		}
